@@ -1,0 +1,49 @@
+[project]
+name = "strata"
+version = "0.1.0"
+description = "Strata 业务模块基座（uv + Python 3.15）"
+readme = "README.md"
+authors = [
+    { name = "Jerry Liu", email = "lantech.com@gmail.com" }
+]
+requires-python = ">=3.15"
+dependencies = []
+
+[project.scripts]
+strata = "strata.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.4",
+    "ty>=0.0.99",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "RET", "PT", "ARG", "TID", "RUF"]
+# 中文注释与文档字符串里的全角标点是有意的写法，不按“歧义 Unicode 字符”报错
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["strata"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "-ra --strict-markers --strict-config --cov=strata --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+# 仅是 python -m strata 的转发垫片，不值得单独测
+omit = ["src/strata/__main__.py"]

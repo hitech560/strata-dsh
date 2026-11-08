@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# uv / tooling caches kept off C:
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+.ty_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
