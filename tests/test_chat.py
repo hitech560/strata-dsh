@@ -20,6 +20,9 @@ from strata.core import (
     Lane,
     StreamEvent,
     ThinkingDelta,
+    Turn,
+    Usage,
+    UsageEvent,
 )
 from strata.errors import (
     ConfigurationError,
@@ -147,6 +150,7 @@ def _gateway(
     opener: _OpenerScript,
     *,
     max_retries: int = 0,
+    include_usage: bool = True,
     sleep: Callable[[float], None] = lambda _seconds: None,
     on_retry: Callable[[str], None] = lambda _notice: None,
 ) -> chat.GatewayBackend:
@@ -155,6 +159,7 @@ def _gateway(
         model="iq3_s",
         api_key="strata-local",
         max_retries=max_retries,
+        include_usage=include_usage,
         sleep=sleep,
         on_retry=on_retry,
         opener=opener,
@@ -330,6 +335,24 @@ def test_interceptor_reports_thinking_only_round() -> None:
     assert "只有思维链" in sink.text
 
 
+def test_interceptor_counts_tokens_in_the_footer() -> None:
+    sink = _Sink()
+    usage = Usage(input_tokens=60, output_tokens=92, total_tokens=152, output_per_second=17.7)
+    result = _interceptor(sink).consume([AnswerDelta("正文"), UsageEvent(usage)])
+    assert result.usage == usage
+    assert "正文" in sink.text  # usage 事件不会被当成文本吐出来
+    assert "tokens 60→92" in sink.text
+    assert "17.7 token/s" in sink.text
+
+
+def test_interceptor_footer_omits_speed_when_not_reported() -> None:
+    sink = _Sink()
+    result = _interceptor(sink).consume([UsageEvent(Usage(3, 5, 8))])
+    assert result.answer == ""
+    assert "tokens 3→5" in sink.text
+    assert "token/s" not in sink.text
+
+
 # --------------------------------------------------------------------------- 网关协议
 
 
@@ -355,6 +378,56 @@ def test_gateway_accepts_alternate_reasoning_field() -> None:
     opener = _OpenerScript([_sse(_chunk(reasoning="另一种字段"))])
     events = list(_gateway(opener).stream([]))
     assert events == [ThinkingDelta("另一种字段")]
+
+
+def test_gateway_reads_usage_and_timings_from_the_last_frame() -> None:
+    """实测形态：最后一帧带 ``finish_reason`` + ``usage`` + timings。"""
+    frame = {
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+        "usage": {
+            "prompt_tokens": 55,
+            "completion_tokens": 16,
+            "total_tokens": 71,
+            "prompt_tokens_details": {"cached_tokens": 4},
+        },
+        "timings": {"predicted_n": 16, "predicted_per_second": 17.7},
+    }
+    opener = _OpenerScript([_sse(_chunk(content="一个字"), frame)])
+    events = list(_gateway(opener).stream([ChatMessage(role="user", content="说一个字")]))
+    assert events == [
+        AnswerDelta("一个字"),
+        UsageEvent(
+            Usage(
+                input_tokens=55,
+                output_tokens=16,
+                total_tokens=71,
+                cached_input_tokens=4,
+                output_per_second=17.7,
+            )
+        ),
+    ]
+
+
+def test_gateway_handles_usage_only_tail_frame() -> None:
+    """另一种常见形态：最后一帧 ``choices: []`` + ``usage``，账目同样要吃到。"""
+    tail = {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}}
+    opener = _OpenerScript([_sse(_chunk(content="答"), tail)])
+    events = list(_gateway(opener).stream([]))
+    assert events == [AnswerDelta("答"), UsageEvent(Usage(3, 5, 8))]
+
+
+def test_gateway_requests_usage_frames_unless_asked_not_to() -> None:
+    opener = _OpenerScript([_sse(_chunk(content="答"))])
+    list(_gateway(opener).stream([]))
+    raw = opener.requests[0].data
+    assert isinstance(raw, bytes)
+    assert json.loads(raw)["stream_options"] == {"include_usage": True}
+
+    quiet = _OpenerScript([_sse(_chunk(content="答"))])
+    list(_gateway(quiet, include_usage=False).stream([]))
+    raw_off = quiet.requests[0].data
+    assert isinstance(raw_off, bytes)
+    assert "stream_options" not in json.loads(raw_off)
 
 
 def test_gateway_maps_status_codes_to_error_semantics() -> None:
@@ -477,3 +550,52 @@ def test_build_backend_picks_the_two_ports() -> None:
     gateway = chat.build_backend(chat.ChatSettings(backend="strata", base_url="http://h/v1/"))
     assert gateway.name == "gateway"
     assert gateway.target == "http://h/v1/chat/completions"
+
+
+# --------------------------------------------------------------------------- 用量账目
+
+
+def test_usage_ledger_adds_only_reported_turns() -> None:
+    ledger = chat.UsageLedger()
+    assert ledger.describe().startswith("未上报")
+    ledger.add(None)  # 网关没回 usage 的轮次不计数
+    ledger.add(Usage(60, 92, 152, 4, 17.7))
+    ledger.add(Usage(100, 10, 110, 0, 12.0))
+    assert ledger.calls == 2
+    total = ledger.total
+    assert total is not None
+    assert total.input_tokens == 160
+    assert total.output_tokens == 102
+    assert total.total_tokens == 262
+    assert total.cached_input_tokens == 4
+    assert total.output_per_second == 12.0
+    assert "已计 2 轮" in ledger.describe()
+    assert "缓存命中 4" in ledger.describe()
+
+
+def test_session_reports_usage_and_notifies_the_turn_sink() -> None:
+    saved: list[tuple[Turn, Usage | None]] = []
+    backend = _ScriptBackend(lambda _call: [AnswerDelta("答"), UsageEvent(Usage(1, 2, 3))])
+    sink = _Sink()
+    session = chat.ChatSession(
+        backend=backend,
+        conversation=chat.Conversation("S"),
+        painter=_PlainPainter(),
+        write=sink.write,
+        flush=sink.flush,
+        on_turn=lambda turn, usage: saved.append((turn, usage)),
+    )
+    session.ask("问 A")
+    session.ask("问 B")
+    assert [pair[0].user for pair in saved] == ["问 A", "问 B"]
+    assert saved[0][0].answer == "答"
+    assert saved[0][1] == Usage(1, 2, 3)  # 落盘 sink 同时拿到这一轮的账
+    assert session.usage.calls == 2
+    total = session.usage.total
+    assert total is not None
+    assert total.input_tokens == 2
+
+
+def test_settings_reject_blank_session_path() -> None:
+    with pytest.raises(ConfigurationError):
+        chat.validate_settings(chat.ChatSettings(session_file="   "))

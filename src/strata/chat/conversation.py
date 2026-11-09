@@ -1,5 +1,7 @@
 """多轮对话的上下文记忆：滚动窗口的裁剪规则都在这一个文件里。"""
 
+from collections.abc import Iterable
+
 from strata.core import ChatMessage, Turn, clip
 from strata.errors import ConfigurationError, ContextOverflowError, NothingToRetryError
 
@@ -80,6 +82,15 @@ class Conversation:
         removed = len(self._turns)
         self._turns.clear()
         return removed
+
+    def load(self, turns: Iterable[Turn]) -> int:
+        """从转录恢复历史：仍受窗口上限约束，返回实际保留的轮数。"""
+        for turn in turns:
+            self._turns.append(turn)
+        overflow = len(self._turns) - self.max_turns
+        if overflow > 0:
+            del self._turns[:overflow]
+        return len(self._turns)
 
     def messages_for(self, user_text: str) -> list[ChatMessage]:
         """本轮请求的上下文：system + 装得下的历史轮次 + 本轮输入（新的在最后）。

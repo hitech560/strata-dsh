@@ -9,7 +9,16 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
-from strata.core import Lane, LanePainter, StreamEvent, StreamResult, ThinkingDelta
+from strata.core import (
+    AnswerDelta,
+    Lane,
+    LanePainter,
+    StreamEvent,
+    StreamResult,
+    ThinkingDelta,
+    Usage,
+    UsageEvent,
+)
 
 THINKING_HEADER = "🧠 Thinking ▾ "
 THINKING_END = "🧠 思维链结束"
@@ -42,6 +51,7 @@ class ThinkingInterceptor:
     _thinking: list[str] = field(default_factory=list, init=False, repr=False)
     _answer: list[str] = field(default_factory=list, init=False, repr=False)
     _phase: str = field(default="idle", init=False, repr=False)
+    _usage: Usage | None = field(default=None, init=False, repr=False)
 
     def consume(self, events: Iterable[StreamEvent]) -> StreamResult:
         started = self.clock()
@@ -50,8 +60,10 @@ class ThinkingInterceptor:
             for event in events:
                 if isinstance(event, ThinkingDelta):
                     self._on_thinking(event.text)
-                else:
+                elif isinstance(event, AnswerDelta):
                     self._on_answer(event.text)
+                elif isinstance(event, UsageEvent):
+                    self._usage = event.usage
         except KeyboardInterrupt:
             interrupted = True
             self._emit("\n⏸ 已中断，保留已产出的内容\n", "warn")
@@ -61,6 +73,7 @@ class ThinkingInterceptor:
             thinking="".join(self._thinking),
             elapsed=self.clock() - started,
             interrupted=interrupted,
+            usage=self._usage,
         )
 
     def _on_thinking(self, text: str) -> None:
@@ -97,6 +110,11 @@ class ThinkingInterceptor:
         else:
             self._emit("\n", "answer")
         sizes = f"正文 {len(answer)} 字 · 思维链 {len(thinking)} 字"
+        if self._usage is not None:
+            sizes += f" · tokens {self._usage.input_tokens}→{self._usage.output_tokens}"
+            speed = self._usage.output_per_second
+            if speed is not None:
+                sizes += f" · {speed:.1f} token/s"
         self._emit(f"· {sizes} · 耗时 {elapsed:.1f}s\n", "muted")
         if not self.streaming:
             self.write("".join(self._buffer))

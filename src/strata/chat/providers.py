@@ -14,7 +14,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager
 
-from strata.core import AnswerDelta, ChatMessage, StreamEvent, ThinkingDelta
+from strata.core import AnswerDelta, ChatMessage, StreamEvent, ThinkingDelta, Usage, UsageEvent
 from strata.core.text import clip
 from strata.errors import (
     ConfigurationError,
@@ -85,6 +85,7 @@ class GatewayBackend:
         max_retries: int = DEFAULT_MAX_RETRIES,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        include_usage: bool = True,
         opener: LineOpener | None = None,
         sleep: Callable[[float], None] = time.sleep,
         on_retry: Callable[[str], None] | None = None,
@@ -100,6 +101,7 @@ class GatewayBackend:
         self.max_retries = max_retries
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.include_usage = include_usage
         self.endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self.target = self.endpoint
         self._opener = opener if opener is not None else default_opener
@@ -153,6 +155,9 @@ class GatewayBackend:
                 {"role": message.role, "content": message.content} for message in messages
             ],
         }
+        if self.include_usage:
+            # 实测：网关认这个开关，把 usage/timings 挂在最后一帧上（见协议文档样本）
+            payload["stream_options"] = {"include_usage": True}
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if self.max_tokens is not None:
@@ -189,20 +194,22 @@ class GatewayBackend:
                 "网关在流里回了错误", context={"error": clip(str(event["error"]), 200)}
             )
         choices = event.get("choices")
-        if not choices:
-            return  # 只有 usage / 心跳的收尾事件
-        if not isinstance(choices, list):
-            raise ProviderResponseError("流式响应的 choices 不是数组")
-        first = _mapping(choices[0])
-        if first is None:
-            raise ProviderResponseError("流式响应缺少 choices[0] 对象")
-        delta = _mapping(first.get("delta")) or {}
-        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-        if isinstance(reasoning, str) and reasoning:
-            yield ThinkingDelta(reasoning)
-        content = delta.get("content")
-        if isinstance(content, str) and content:
-            yield AnswerDelta(content)
+        if choices:
+            if not isinstance(choices, list):
+                raise ProviderResponseError("流式响应的 choices 不是数组")
+            first = _mapping(choices[0])
+            if first is None:
+                raise ProviderResponseError("流式响应缺少 choices[0] 对象")
+            delta = _mapping(first.get("delta")) or {}
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(reasoning, str) and reasoning:
+                yield ThinkingDelta(reasoning)
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                yield AnswerDelta(content)
+        usage = _usage_from(event.get("usage"), event.get("timings"))
+        if usage is not None:
+            yield UsageEvent(usage)
 
     def _map_http_error(self, exc: urllib.error.HTTPError) -> ProviderError:
         status = exc.code
@@ -295,6 +302,39 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
         return float(raw)
     except TypeError, ValueError:
         return None
+
+
+def _as_int(value: object) -> int:
+    """外部 JSON 里的计数：只认真整数（``bool`` 也是 int 子类，先挡掉）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _usage_from(raw_usage: object, raw_timings: object) -> Usage | None:
+    """把网关的 ``usage`` + ``timings`` 合成一份 :class:`~strata.core.Usage`。
+
+    实测键名：``prompt_tokens`` / ``completion_tokens`` / ``total_tokens`` /
+    ``prompt_tokens_details.cached_tokens``，速度在 ``timings.predicted_per_second``。
+    """
+    usage = _mapping(raw_usage)
+    if usage is None:
+        return None
+    details = _mapping(usage.get("prompt_tokens_details")) or {}
+    timings = _mapping(raw_timings) or {}
+    return Usage(
+        input_tokens=_as_int(usage.get("prompt_tokens")),
+        output_tokens=_as_int(usage.get("completion_tokens")),
+        total_tokens=_as_int(usage.get("total_tokens")),
+        cached_input_tokens=_as_int(details.get("cached_tokens")),
+        output_per_second=_as_float(timings.get("predicted_per_second")),
+    )
 
 
 class LocalBackend:

@@ -38,14 +38,17 @@ scripts/check.ps1      统一门禁
 src/strata/            包本体
   __init__.py          公共 API 与 __all__（只导出版本与错误语义，保持轻量）
   errors.py            异常层级（业务异常一律派生自 StrataError；含提供方/传输语义类）
-  core/                共享内核：值对象、端口（ChatBackend / LanePainter）、文本工具
-  chat/                业务模块：多轮上下文记忆 + 🧠 思维链拦截 + 网关流式客户端 + 离线兜底
-  cli.py / __main__.py 控制台入口：参数解析、环境变量覆盖、装配、REPL
+  core/                共享内核：值对象（含 Usage）、端口（ChatBackend / LanePainter）、文本工具
+  chat/                业务模块：上下文记忆 + 🧠 思维链拦截 + 网关流式客户端 + JSONL 转录 + 用量账
+  cli/                 入口包：_parser（参数与环境变量）、_terminal（ANSI 与文案）、_repl（主循环）、__init__（装配与 main）
+  __main__.py          python -m strata 的转发垫片
   py.typed             对外声明类型可用
 tests/                 pytest，只依赖公共 API
+  conftest.py          草稿夹具（工作区内自建自删，不碰系统临时目录）
   test_architecture.py 依赖方向守卫（把 docs/architecture.md 的约定跑成测试）
+  test_transcript.py   JSONL 转录：往返、坏行容错、跨进程恢复
 docs/architecture.md         分层与依赖方向约定
-docs/gateway-stream-protocol.md  流式网关协议实测记录（SSE 帧序、思维链字段、重试纪律）
+docs/gateway-stream-protocol.md  流式网关协议实测记录（SSE 帧序、思维链字段、usage 账目、重试纪律）
 ```
 
 ## 聊天 CLI（`strata chat`）
@@ -57,6 +60,10 @@ docs/gateway-stream-protocol.md  流式网关协议实测记录（SSE 帧序、�
   `--thinking hide` 隐藏但仍留档，`/thinking on|off` 运行时切换。
 - 多轮记忆：`--max-turns`（默认 12）与 `--max-context-chars`（默认 12000）双重上限，
   谁先到按谁裁剪；思维链不回灌模型。`/history`、`/retry`、`/clear`、`/status` 见 `/help`。
+- 跨进程续聊：`--session 路径.jsonl`（或 `STRATA_SESSION_FILE`）——启动时把历史恢复进上下文，
+  每轮追加一行 JSONL；`/session` 看路径与读写计数。坏行只跳过并计数，不会整份打不开。
+- token 账：默认向网关要 usage 帧（`--no-usage` 可关），页脚每轮显示
+  `tokens 55→16 · 17.7 token/s`，`/status` 显示跨轮累计与前缀缓存命中；网关没回就老实写「未上报」。
 - `--backend local` 离线兜底；`--prompt "…"` 非交互；`--no-color` 给管道/重定向。
 - 退出码：`0` 正常 / `1` 运行错 / `2` 配置错 / `130` 中断。
 

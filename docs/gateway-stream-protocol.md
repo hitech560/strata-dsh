@@ -14,7 +14,7 @@
 | 端点 | `POST {base_url}/chat/completions`（`base_url` 末尾 `/` 会被剥掉） |
 | 请求头 | `Content-Type: application/json`、`Accept: text/event-stream`、`Authorization: Bearer <token>` |
 | 凭据 | 本地网关接受任意非空串；项目默认 `strata-local`（`--api-key` / `STRATA_API_KEY`） |
-| 请求体 | `model`、`stream: true`、`messages: [{role, content}, …]`；`temperature` / `max_tokens` 仅在显式给出时才带上 |
+| 请求体 | `model`、`stream: true`、`messages: [{role, content}, …]`；`temperature` / `max_tokens` 仅在显式给出时才带上；默认还带 `stream_options: {"include_usage": true}`（`--no-usage` 可关） |
 
 `GET {base_url}/models` 可列模型，用于连通性与模型名自检。
 
@@ -46,7 +46,8 @@ data: [DONE]
 6. 正文在 `choices[0].delta.content`。
 7. 同一帧里 `reasoning_content` 与 `content` 不会同时非空；出现时按“先思维链后正文”的顺序
    产出（模型切换点的常见约定）。
-8. **没有 `choices` 或 `choices` 为空**的帧（只带 `usage` 的收尾统计帧）→ 跳过，不是错误。
+8. **没有 `choices` 或 `choices` 为空的帧不产出文本**，但同一帧若带 `usage`，
+   账目**必须**吃到（这是统计帧的唯一用途），不能整帧跳过。
 9. 带内错误：帧里出现顶层 `error` 对象 → 抛 `ProviderResponseError`，不当正文吐给用户。
 10. 一行不是合法 JSON → 抛 `ProviderResponseError`，`context` 里带行号与截断原文。
 
@@ -81,7 +82,43 @@ data: [DONE]
 - 思维链长度可观（实测一轮 150–210 字，复杂题上千字），所以
   `--max-context-chars` 的预算只算正文，不算思维链。
 
-## 5. 怎么自己复现一帧
+## 5. usage 帧与 token 账目（实测）
+
+请求带上 `stream_options: {"include_usage": true}` 后，**最后一帧**同时带
+`finish_reason`、`usage`，外加网关特有的 `timings`（llama.cpp 风格）：
+
+```
+data: {…"choices": [{"index":0,"delta":{},"finish_reason":"stop"}],
+       "usage": {"prompt_tokens":55,"completion_tokens":16,"total_tokens":71,
+                 "prompt_tokens_details":{"cached_tokens":0}},
+       "timings": {"cache_n":0,"prompt_n":55,"prompt_ms":2239.2,"prompt_per_token_ms":40.713,
+                   "prompt_per_second":24.6,"predicted_n":16,"predicted_ms":904.6,
+                   "predicted_per_token_ms":56.538,"predicted_per_second":17.7,
+                   "draft_n":11,"draft_n_accepted":6}}
+data: [DONE]
+```
+
+字段映射（`GatewayBackend._usage_from` → :class:`strata.core.Usage`）：
+
+| 网关字段 | 落到 | 说明 |
+| --- | --- | --- |
+| `prompt_tokens` | `Usage.input_tokens` | 回灌的上下文大小，`/status` 的窗口预算按它核对 |
+| `completion_tokens` | `Usage.output_tokens` | **含思维链**：推理模型的思考就是生成的一部分 |
+| `total_tokens` | `Usage.total_tokens` | |
+| `prompt_tokens_details.cached_tokens` | `Usage.cached_input_tokens` | 前缀缓存命中 |
+| `timings.predicted_per_second` | `Usage.output_per_second` | 生成速度；没有就不显示 |
+
+三条纪律：
+
+- usage 帧里的 `delta` 是空对象 → 不产出文本；收尾仍然只认 `[DONE]`，别把它当结束信号。
+- 另一类实现把 usage 放在 `choices: []` 的独立尾帧里 → 两种形态都认。
+- `--no-usage` 留给对未知字段严格的网关；关掉后 `/status` 老实显示「用量 未上报」。
+
+页脚每轮带 `tokens 55→16 · 17.7 token/s`，`/status` 打跨轮累计（只统计真的回过 usage 的轮次）。
+顺带一条实测教训：**思维链吃紧时会把 `max_tokens` 用光**，正文 0 字（`finish_reason":"length"`），
+所以 `--max-tokens` 对推理模型要给得比直觉更大。
+
+## 6. 怎么自己复现一帧
 
 ```powershell
 # 列模型

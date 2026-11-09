@@ -29,6 +29,7 @@ from strata.chat.session import (
     BACKEND_CHOICES,
     ChatSession,
     ChatSettings,
+    UsageLedger,
     build_backend,
     validate_settings,
 )
@@ -37,6 +38,15 @@ from strata.chat.thinking import (
     THINKING_END,
     THINKING_HEADER,
     ThinkingInterceptor,
+)
+from strata.chat.transcript import (
+    TRANSCRIPT_VERSION,
+    Entry,
+    TranscriptLog,
+    append_turn,
+    load_entries,
+    load_turns,
+    turn_writer,
 )
 
 __all__ = [
@@ -52,16 +62,24 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "THINKING_END",
     "THINKING_HEADER",
+    "TRANSCRIPT_VERSION",
     "ChatSession",
     "ChatSettings",
     "Conversation",
+    "Entry",
     "GatewayBackend",
     "LineOpener",
     "LocalBackend",
     "ResponseLines",
     "ThinkingInterceptor",
+    "TranscriptLog",
+    "UsageLedger",
+    "append_turn",
     "build_backend",
     "default_opener",
+    "load_entries",
+    "load_turns",
+    "turn_writer",
     "validate_settings",
     "validate_window",
 ]

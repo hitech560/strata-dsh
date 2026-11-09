@@ -5,7 +5,8 @@
 ```
 strata.core    共享内核：值对象 / 领域事件 / 端口（Protocol）/ 文本工具
 strata.<mod>   业务模块，一个模块一个子包（目前落地：strata.chat）
-strata.cli     进程入口：参数解析、环境变量覆盖、依赖装配、终端 I/O —— 不写业务规则
+strata.cli     进程入口包：_parser（参数与环境变量）/ _terminal（ANSI 与文案）/ _repl（主循环）
+               / __init__（装配与 main）—— 不写业务规则
 strata.errors  错误语义（所有业务异常的根）
 ```
 

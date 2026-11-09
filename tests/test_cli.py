@@ -3,6 +3,8 @@
 引擎行为（窗口裁剪、SSE 解析、错误语义）在 ``tests/test_chat.py``，这里只盯装配与终端。
 """
 
+from pathlib import Path
+
 import pytest
 
 import strata
@@ -133,3 +135,49 @@ def test_palette_disables_itself_for_pipes(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("FORCE_COLOR", "1")
     assert cli.resolve_palette(no_color=False).enabled is True
     assert cli.resolve_palette(no_color=True).enabled is False
+
+
+def test_chat_persists_and_resumes_the_transcript(
+    transcript_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = transcript_path
+    first = cli.main(
+        ["chat", "--backend", "local", "--session", str(log), "--prompt", "第一轮", "--no-color"]
+    )
+    assert first == 0
+    assert log.exists()
+    assert "会话转录" in capsys.readouterr().out
+
+    second = cli.main(
+        ["chat", "--backend", "local", "--session", str(log), "--prompt", "第二轮", "--no-color"]
+    )
+    out = capsys.readouterr().out
+    assert second == 0
+    assert "恢复 1 轮" in out  # banner 说明从转录里捞回了上一进程的历史
+    assert "历史 1 轮" in out  # 恢复的轮次确实进了本轮上下文
+
+
+def test_chat_status_shows_usage_and_transcript(
+    transcript_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log = transcript_path
+    script = iter(["/status", "/session", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(script))
+    code = cli.main(["chat", "--backend", "local", "--session", str(log), "--no-color"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "用量 未上报" in captured.out  # 本地后端不回 usage，就照实说
+    assert "未启用" not in captured.out  # 转录已开，不该再显示未启用
+    assert str(log) in captured.out  # /status 与 /session 都报路径
+
+
+def test_no_usage_flag_turns_off_usage_frames() -> None:
+    parser = cli.build_parser()
+    assert cli.settings_from_args(parser.parse_args(["chat"])).request_usage is True
+    assert cli.settings_from_args(parser.parse_args(["chat", "--no-usage"])).request_usage is False
+
+
+def test_session_path_can_come_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRATA_SESSION_FILE", "from-env.jsonl")
+    settings = cli.settings_from_args(cli.build_parser().parse_args(["chat"]))
+    assert settings.session_file == "from-env.jsonl"

@@ -14,6 +14,8 @@ from strata.core.chat import (
     StreamResult,
     ThinkingDelta,
     Turn,
+    Usage,
+    UsageEvent,
 )
 from strata.core.text import clip
 
@@ -28,5 +30,7 @@ __all__ = [
     "StreamResult",
     "ThinkingDelta",
     "Turn",
+    "Usage",
+    "UsageEvent",
     "clip",
 ]

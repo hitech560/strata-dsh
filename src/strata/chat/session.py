@@ -24,7 +24,7 @@ from strata.chat.providers import (
     LocalBackend,
 )
 from strata.chat.thinking import ThinkingInterceptor
-from strata.core import ChatBackend, LanePainter, StreamResult
+from strata.core import ChatBackend, LanePainter, StreamResult, Turn, Usage
 from strata.errors import ConfigurationError
 
 BACKEND_CHOICES = ("strata", "local")
@@ -55,6 +55,9 @@ class ChatSettings:
     streaming: bool = True
     temperature: float | None = None
     max_tokens: int | None = None
+    request_usage: bool = True
+    session_file: str | None = None
+    """JSONL 转录路径：给了就在启动时恢复历史，并在每轮后追加。"""
 
 
 def validate_settings(settings: ChatSettings) -> ChatSettings:
@@ -79,6 +82,8 @@ def validate_settings(settings: ChatSettings) -> ChatSettings:
         raise ConfigurationError("max_tokens 至少为 1", context={"max_tokens": settings.max_tokens})
     if settings.backend not in BACKEND_CHOICES:
         raise ConfigurationError("未知后端", context={"backend": settings.backend})
+    if settings.session_file is not None and not settings.session_file.strip():
+        raise ConfigurationError("session 文件路径不能为空")
     if not settings.system_prompt.strip():
         settings = replace(settings, system_prompt=DEFAULT_SYSTEM_PROMPT)
     validate_window(
@@ -108,7 +113,52 @@ def build_backend(settings: ChatSettings) -> ChatBackend:
         max_retries=settings.max_retries,
         temperature=settings.temperature,
         max_tokens=settings.max_tokens,
+        include_usage=settings.request_usage,
     )
+
+
+class UsageLedger:
+    """跨轮 token 账目：只累计网关真的上报过 usage 的那些轮次。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.total: Usage | None = None
+
+    def add(self, usage: Usage | None) -> None:
+        if usage is None:
+            return
+        self.calls += 1
+        base = self.total or Usage(input_tokens=0, output_tokens=0, total_tokens=0)
+        self.total = Usage(
+            input_tokens=base.input_tokens + usage.input_tokens,
+            output_tokens=base.output_tokens + usage.output_tokens,
+            total_tokens=base.total_tokens + usage.total_tokens,
+            cached_input_tokens=base.cached_input_tokens + usage.cached_input_tokens,
+            output_per_second=(
+                usage.output_per_second
+                if usage.output_per_second is not None
+                else base.output_per_second
+            ),
+        )
+
+    def describe(self) -> str:
+        """一行摘要，给 ``/status`` 用。"""
+        if self.total is None:
+            return "未上报（网关没回 usage 帧）"
+        speed = (
+            f" · {self.total.output_per_second:.1f} token/s"
+            if self.total.output_per_second is not None
+            else ""
+        )
+        cached = (
+            f" · 缓存命中 {self.total.cached_input_tokens}"
+            if self.total.cached_input_tokens
+            else ""
+        )
+        return (
+            f"{self.total.input_tokens}→{self.total.output_tokens} tokens"
+            f"（合计 {self.total.total_tokens}）{cached}{speed} · 已计 {self.calls} 轮"
+        )
 
 
 class ChatSession:
@@ -124,6 +174,7 @@ class ChatSession:
         flush: Callable[[], None],
         streaming: bool = True,
         show_thinking: bool = True,
+        on_turn: Callable[[Turn, Usage | None], None] | None = None,
     ) -> None:
         self.backend = backend
         self.conversation = conversation
@@ -132,6 +183,8 @@ class ChatSession:
         self.flush = flush
         self.streaming = streaming
         self.show_thinking = show_thinking
+        self.on_turn = on_turn
+        self.usage = UsageLedger()
 
     def ask(self, text: str) -> StreamResult:
         messages = self.conversation.messages_for(text)
@@ -143,12 +196,15 @@ class ChatSession:
             streaming=self.streaming,
         )
         result = interceptor.consume(self.backend.stream(messages))
-        self.conversation.add_turn(
+        turn = self.conversation.add_turn(
             text,
             result.answer,
             result.thinking,
             interrupted=result.interrupted,
         )
+        self.usage.add(result.usage)
+        if self.on_turn is not None:
+            self.on_turn(turn, result.usage)
         return result
 
     def retry(self) -> StreamResult:

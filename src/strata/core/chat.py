@@ -38,7 +38,26 @@ class AnswerDelta:
     text: str
 
 
-type StreamEvent = ThinkingDelta | AnswerDelta
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """一次调用的 token 账目（来自网关 usage 帧，见 ``docs/gateway-stream-protocol.md``）。"""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cached_input_tokens: int = 0
+    output_per_second: float | None = None
+    """生成速度（token/s），来自网关 timings；拿不到就是 ``None``。"""
+
+
+@dataclass(frozen=True, slots=True)
+class UsageEvent:
+    """用量事件：不产出文本，只带一份 :class:`Usage`。"""
+
+    usage: Usage
+
+
+type StreamEvent = ThinkingDelta | AnswerDelta | UsageEvent
 """提供方向上吐出的流式事件。"""
 
 
@@ -60,6 +79,7 @@ class StreamResult:
     thinking: str
     elapsed: float
     interrupted: bool
+    usage: Usage | None = None
 
 
 class ChatBackend(Protocol):
@@ -91,4 +111,6 @@ __all__ = [
     "StreamResult",
     "ThinkingDelta",
     "Turn",
+    "Usage",
+    "UsageEvent",
 ]
